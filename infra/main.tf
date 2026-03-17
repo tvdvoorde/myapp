@@ -4,10 +4,6 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "=4.49.0"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = "=3.7.2"
-    }
     # azuread = {
     #   source = "hashicorp/azuread"
     #   #   version = "=2.47.0"
@@ -33,6 +29,10 @@ variable "environment" {
   default = ""
 }
 
+variable "web_app_name" {
+  default = ""
+}
+
 data "azurerm_client_config" "current" {
 }
 
@@ -46,13 +46,8 @@ resource "azurerm_service_plan" "myappplan" {
 }
 
 
-resource "random_integer" "suffix" {
-  min = 1000
-  max = 9999
-}
-
 resource "azurerm_linux_web_app" "myapp" {
-  name                = "app-myapp${random_integer.suffix.result}-${var.environment}"
+  name                = var.web_app_name != "" ? var.web_app_name : "app-myapp-${var.environment}"
   location            = data.azurerm_resource_group.infra.location
   resource_group_name = data.azurerm_resource_group.infra.name
   service_plan_id     = azurerm_service_plan.myappplan.id
