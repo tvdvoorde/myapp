@@ -47,7 +47,7 @@ resource "azurerm_service_plan" "myappplan" {
 
 
 resource "azurerm_linux_web_app" "myapp" {
-  name                = var.web_app_name != "" ? var.web_app_name : "app-myapp-${var.environment}"
+  name                = var.web_app_name
   location            = data.azurerm_resource_group.infra.location
   resource_group_name = data.azurerm_resource_group.infra.name
   service_plan_id     = azurerm_service_plan.myappplan.id
