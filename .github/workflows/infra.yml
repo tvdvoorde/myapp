@@ -38,7 +38,7 @@ run-name: infra | ${{ github.event.inputs.action }} | ${{ github.event.inputs.en
 jobs:
   run-terraform:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}
+    # environment: ${{ github.event.inputs.environment }}
     steps:
       - uses: actions/checkout@v4
 
