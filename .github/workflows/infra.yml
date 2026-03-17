@@ -1,0 +1,87 @@
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'The target environment'
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prd
+      action:
+        description: 'Action'
+        required: true
+        default: apply
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+concurrency:
+  group: infra-${{ github.event.inputs.environment }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ARM_USE_OIDC: true
+  # TF_LOG: DEBUG
+
+name: infra
+run-name: infra | ${{ github.event.inputs.action }} | ${{ github.event.inputs.environment }} | ${{ github.ref_name }}
+
+jobs:
+  run-terraform:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 'Environment variables'
+        run: |
+          cat env/generic.env >>$GITHUB_ENV
+          cat env/${{ github.event.inputs.environment }}.env >>$GITHUB_ENV
+
+      - uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.13.4
+
+      - name: terraform version
+        run: |
+          terraform version
+
+      - name: terraform init
+        run: |
+          terraform -chdir=infra init \
+              -backend-config="key=myapp${{ github.event.inputs.environment }}.tfstate" \
+              -backend-config="resource_group_name=${{ env.RG_STATE}}" \
+              -backend-config="storage_account_name=${{ env.SA_NAME }}" 
+
+      - name: terraform validate 
+        run: |
+          terraform -chdir=infra validate 
+
+      - name: terraform plan 
+        run: |
+          terraform -chdir=infra plan -out=tfplan
+
+      - name: terraform apply
+        if: (inputs.action == 'apply') 
+        run: |
+          terraform -chdir=infra apply -input=false -auto-approve tfplan
+
+      - name: terraform plan destroy
+        if: (inputs.action == 'destroy') 
+
+        run: |
+          terraform -chdir=infra plan -destroy -out=tfplan-destroy
+
+      - name: terraform destroy
+        if: (inputs.action == 'destroy') 
+        run: |
+          terraform -chdir=infra apply -input=false -auto-approve tfplan-destroy

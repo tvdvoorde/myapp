@@ -1,0 +1,231 @@
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "=4.49.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "=3.7.2"
+    }
+    # azuread = {
+    #   source = "hashicorp/azuread"
+    #   #   version = "=2.47.0"
+    # }
+  }
+  backend "azurerm" {
+    container_name = "tfstate"
+    key            = "overriden-in-github-actions.yml"
+  }
+}
+
+provider "azurerm" {
+  resource_provider_registrations = "none"
+  features {
+  }
+}
+
+data "azurerm_resource_group" "infra" {
+  name = "rg-linc-${var.environment}"
+}
+
+variable "environment" {
+  default = ""
+}
+
+# Get current client config for Key Vault access
+data "azurerm_client_config" "current" {
+}
+
+# User Assigned Managed Identity for App Service
+resource "azurerm_user_assigned_identity" "app_identity" {
+  name                = "id-linc-${var.environment}"
+  resource_group_name = data.azurerm_resource_group.infra.name
+  location            = data.azurerm_resource_group.infra.location
+}
+
+# Random suffix for Key Vault name (ensures global uniqueness)
+resource "random_string" "keyvault_suffix" {
+  length  = 6
+  upper   = false
+  special = false
+}
+
+# Generate random password for SQL admin
+resource "random_password" "sql_admin_password" {
+  length           = 24
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+  min_numeric      = 1
+  min_upper        = 1
+  min_lower        = 1
+  min_special      = 1
+}
+
+# Azure Key Vault
+resource "azurerm_key_vault" "keyvault" {
+  name                       = "kv-linc-${var.environment}-${random_string.keyvault_suffix.result}"
+  location                   = data.azurerm_resource_group.infra.location
+  resource_group_name        = data.azurerm_resource_group.infra.name
+  tenant_id                  = data.azurerm_client_config.current.tenant_id
+  sku_name                   = "standard"
+  soft_delete_retention_days = 7
+  purge_protection_enabled   = false
+
+  # Enable RBAC authorization
+  rbac_authorization_enabled = true
+}
+
+# SQL Server
+resource "azurerm_mssql_server" "sql_server" {
+  name                         = "sql-linc-${var.environment}"
+  resource_group_name          = data.azurerm_resource_group.infra.name
+  location                     = data.azurerm_resource_group.infra.location
+  version                      = "12.0"
+  administrator_login          = "sqladmin"
+  administrator_login_password = random_password.sql_admin_password.result
+}
+
+# WARNING: This firewall rule opens the SQL Server to all IPv4 addresses.
+# Restrict this in production environments.
+resource "azurerm_mssql_firewall_rule" "allow_all_internet" {
+  name             = "AllowAllInternet"
+  server_id        = azurerm_mssql_server.sql_server.id
+  start_ip_address = "0.0.0.0"
+  end_ip_address   = "255.255.255.255"
+}
+
+# SQL Database with free tier (serverless General Purpose)
+resource "azurerm_mssql_database" "sql_database" {
+  name      = "sqldb-linc-${var.environment}"
+  server_id = azurerm_mssql_server.sql_server.id
+  sku_name  = "GP_S_Gen5_2"
+
+  # Free tier settings
+  auto_pause_delay_in_minutes = 60
+  min_capacity                = 0.5
+  max_size_gb                 = 32
+
+  # Tags to identify free tier
+  tags = {
+    free_tier = "true"
+  }
+}
+
+# Store SQL admin password in Key Vault
+resource "azurerm_key_vault_secret" "sql_admin_password" {
+  name         = "sql-admin-password"
+  value        = random_password.sql_admin_password.result
+  key_vault_id = azurerm_key_vault.keyvault.id
+
+  depends_on = [
+    azurerm_role_assignment.keyvault_admin
+  ]
+}
+
+# Store SQL connection string in Key Vault
+resource "azurerm_key_vault_secret" "sql_connection_string" {
+  name         = "sql-connection-string"
+  value        = "Server=tcp:${azurerm_mssql_server.sql_server.fully_qualified_domain_name},1433;Initial Catalog=${azurerm_mssql_database.sql_database.name};Persist Security Info=False;User ID=${azurerm_mssql_server.sql_server.administrator_login};Password=${random_password.sql_admin_password.result};MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"
+  key_vault_id = azurerm_key_vault.keyvault.id
+
+  depends_on = [
+    azurerm_role_assignment.keyvault_admin
+  ]
+}
+
+# Grant deploying user/service principal Key Vault Secrets Officer role for initial setup
+resource "azurerm_role_assignment" "keyvault_admin" {
+  scope                = azurerm_key_vault.keyvault.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+
+resource "azurerm_service_plan" "appserviceplan" {
+  name                = "asp-linc-${var.environment}"
+  location            = data.azurerm_resource_group.infra.location
+  resource_group_name = data.azurerm_resource_group.infra.name
+  os_type             = "Linux"
+  sku_name            = "F1"
+}
+
+resource "azurerm_linux_web_app" "appservice" {
+  name                = "app-linc-${var.environment}"
+  location            = data.azurerm_resource_group.infra.location
+  resource_group_name = data.azurerm_resource_group.infra.name
+  service_plan_id     = azurerm_service_plan.appserviceplan.id
+
+  # Attach user-assigned managed identity
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.app_identity.id]
+  }
+
+  # Use the user-assigned identity for Key Vault references
+  key_vault_reference_identity_id = azurerm_user_assigned_identity.app_identity.id
+
+  site_config {
+    always_on = false
+    application_stack {
+      node_version = "22-lts"
+    }
+  }
+
+  # Configure environment variables with Key Vault references
+  app_settings = {
+    "SQL_CONNECTION_STRING" = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.sql_connection_string.versionless_id})"
+    "SQL_ADMIN_PASSWORD"    = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.sql_admin_password.versionless_id})"
+    "SQL_SERVER"            = azurerm_mssql_server.sql_server.fully_qualified_domain_name
+    "SQL_DATABASE"          = azurerm_mssql_database.sql_database.name
+    "SQL_USER"              = azurerm_mssql_server.sql_server.administrator_login
+  }
+
+  depends_on = [
+    azurerm_role_assignment.appservice_keyvault_secrets_user
+  ]
+}
+
+# Re-declare Role Assignment for App Service managed identity AFTER Web App resource to avoid provider timing issues.
+# This block was previously located earlier in the file; moved here with explicit depends_on for clarity.
+resource "azurerm_role_assignment" "appservice_keyvault_secrets_user" {
+  scope                = azurerm_key_vault.keyvault.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_user_assigned_identity.app_identity.principal_id
+
+}
+
+resource "azurerm_role_assignment" "appservice_keyvault_secrets_interactive_user" {
+  scope                = azurerm_key_vault.keyvault.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = "b2fe2302-a1f7-4349-8ff8-b3b206691ac5"
+
+}
+
+output "appservice_default_hostname" {
+  value = azurerm_linux_web_app.appservice.default_hostname
+}
+
+output "sql_server_name" {
+  value = azurerm_mssql_server.sql_server.name
+}
+
+output "sql_server_fqdn" {
+  value = azurerm_mssql_server.sql_server.fully_qualified_domain_name
+}
+
+output "sql_database_name" {
+  value = azurerm_mssql_database.sql_database.name
+}
+
+output "keyvault_name" {
+  value = azurerm_key_vault.keyvault.name
+}
+
+output "keyvault_uri" {
+  value = azurerm_key_vault.keyvault.vault_uri
+}
+
+output "app_identity_principal_id" {
+  value = azurerm_user_assigned_identity.app_identity.principal_id
+}

@@ -1,0 +1,177 @@
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '**.MD'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'The target environment'
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prd
+      action:
+        description: 'Action'
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - test
+          - deploy
+
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ARM_USE_OIDC: true
+
+name: app
+run-name: app | ${{ github.event.inputs.action || 'deploy'}} | ${{ github.event.inputs.environment || 'dev' }} | ${{ github.ref_name }}
+
+
+jobs:
+  test-application:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'app/package-lock.json'
+
+      - name: Install dependencies
+        run: |
+          cd app
+          npm ci --include=dev
+
+      - name: Start application in background
+        run: |
+          cd app
+          npm start &
+          APP_PID=$!
+          echo "APP_PID=$APP_PID" >> $GITHUB_ENV
+        
+      - name: Wait for application to start
+        run: |
+          echo "Waiting for application to start..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Application is ready!"
+              break
+            fi
+            echo "Attempt $i: Application not ready yet, waiting..."
+            sleep 2
+          done
+
+      - name: Run API tests
+        run: |
+          cd app
+          echo "Running structured API tests..."
+          export TEST_BASE_URL=http://localhost:8080
+          npx jest --ci --coverage --watchAll=false
+        
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_number }}
+          path: |
+            app/coverage/
+            app/junit.xml
+          retention-days: 7
+
+      - name: Stop application
+        if: always()
+        run: |
+          if [ ! -z "$APP_PID" ]; then
+            kill $APP_PID || true
+          fi
+
+  deploy-to-azure:
+    needs: test-application
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    if: github.event.inputs.action == 'deploy' || github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 'Load environment variables'
+        run: |
+          cat env/generic.env >>$GITHUB_ENV
+          cat env/${{ github.event.inputs.environment || 'dev' }}.env >>$GITHUB_ENV
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'app/package-lock.json'
+
+      - name: Install dependencies
+        run: |
+          cd app
+          npm ci --production
+
+      - name: Create deployment package
+        run: |
+          cd app
+          zip -r ../deployment.zip . -x "node_modules/.cache/*" "*.log"
+
+      - name: Deploy to Azure Web App
+        run: |
+
+          az webapp deploy \
+            --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+            --name ${{ env.WEB_APP_NAME }} \
+            --src-path deployment.zip 
+
+      - name: Verify deployment
+        run: |
+          # Wait for deployment to complete
+          echo "Waiting for deployment to complete..."
+          sleep 30
+          
+          # Test the deployed application
+          APP_URL="https://${{ env.WEB_APP_NAME }}.azurewebsites.net"
+          echo "Testing deployed application at: $APP_URL"
+          
+          # Test health endpoint availability
+          for i in {1..10}; do
+            if curl -f "$APP_URL/health" > /dev/null 2>&1; then
+              echo "✅ Deployed application is responding!"
+              break
+            fi
+            echo "Attempt $i: Deployment not ready yet, waiting..."
+            sleep 10
+          done
+          
+          # Run comprehensive tests against deployed application
+          cd app
+          echo "Installing test dependencies..."
+          npm install --only=dev
+          export TEST_BASE_URL="$APP_URL"
+          echo "Running full test suite against deployed application..."
+          npx jest --ci --coverage --watchAll=false
+          
+          echo "✅ Deployment verification completed successfully!"
