@@ -46,6 +46,9 @@ jobs:
         run: |
           cat env/generic.env >>$GITHUB_ENV
           cat env/${{ github.event.inputs.environment }}.env >>$GITHUB_ENV
+
+      - name: Export Terraform variables
+        run: |
           echo "TF_VAR_web_app_name=${WEB_APP_NAME}" >>$GITHUB_ENV
 
       - name: Azure Login
