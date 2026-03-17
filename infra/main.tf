@@ -37,7 +37,7 @@ data "azurerm_client_config" "current" {
 }
 
 
-resource "azurerm_service_plan" "appserviceplan" {
+resource "azurerm_service_plan" "myappplan" {
   name                = "asp-myapp-${var.environment}"
   location            = data.azurerm_resource_group.infra.location
   resource_group_name = data.azurerm_resource_group.infra.name
@@ -51,16 +51,20 @@ resource "random_integer" "suffix" {
   max = 9999
 }
 
-resource "azurerm_linux_web_app" "appservice" {
+resource "azurerm_linux_web_app" "myapp" {
   name                = "app-myapp${random_integer.suffix.result}-${var.environment}"
   location            = data.azurerm_resource_group.infra.location
   resource_group_name = data.azurerm_resource_group.infra.name
-  service_plan_id     = azurerm_service_plan.appserviceplan.id
+  service_plan_id     = azurerm_service_plan.myappplan.id
 
   site_config {
     always_on = false
     application_stack {
-      node_version = "22-lts"
+      python_version = "3.14"
     }
   }
+}
+
+output "url" {
+  value = azurerm_linux_web_app.myapp.default_site_hostname
 }
