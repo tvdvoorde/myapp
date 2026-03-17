@@ -46,60 +46,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: 'app/package-lock.json'
+          python-version: '3.13'
 
       - name: Install dependencies
         run: |
           cd app
-          npm ci --include=dev
+          pip install -r requirements.txt pytest
 
-      - name: Start application in background
+      - name: Run tests
         run: |
           cd app
-          npm start &
-          APP_PID=$!
-          echo "APP_PID=$APP_PID" >> $GITHUB_ENV
-        
-      - name: Wait for application to start
-        run: |
-          echo "Waiting for application to start..."
-          for i in {1..30}; do
-            if curl -f http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Application is ready!"
-              break
-            fi
-            echo "Attempt $i: Application not ready yet, waiting..."
-            sleep 2
-          done
-
-      - name: Run API tests
-        run: |
-          cd app
-          echo "Running structured API tests..."
-          export TEST_BASE_URL=http://localhost:8080
-          npx jest --ci --coverage --watchAll=false
-        
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-${{ github.run_number }}
-          path: |
-            app/coverage/
-            app/junit.xml
-          retention-days: 7
-
-      - name: Stop application
-        if: always()
-        run: |
-          if [ ! -z "$APP_PID" ]; then
-            kill $APP_PID || true
-          fi
+          python -m pytest test_app.py -v
 
   deploy-to-azure:
     needs: test-application
@@ -121,42 +81,34 @@ jobs:
           tenant-id: ${{ env.ARM_TENANT_ID }}
           subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: 'app/package-lock.json'
-
-      - name: Install dependencies
+      - name: Configure app settings
         run: |
-          cd app
-          npm ci --production
+          az webapp config appsettings set \
+            --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+            --name ${{ env.WEB_APP_NAME }} \
+            --settings TF_VAR_environment=${{ env.TF_VAR_environment }}
 
       - name: Create deployment package
         run: |
           cd app
-          zip -r ../deployment.zip . -x "node_modules/.cache/*" "*.log"
+          zip -r ../deployment.zip . -x "*.pyc" "__pycache__/*" "*.log"
 
       - name: Deploy to Azure Web App
         run: |
-
           az webapp deploy \
             --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
             --name ${{ env.WEB_APP_NAME }} \
-            --src-path deployment.zip 
+            --src-path deployment.zip \
+            --type zip
 
       - name: Verify deployment
         run: |
-          # Wait for deployment to complete
           echo "Waiting for deployment to complete..."
           sleep 30
-          
-          # Test the deployed application
+
           APP_URL="https://${{ env.WEB_APP_NAME }}.azurewebsites.net"
           echo "Testing deployed application at: $APP_URL"
-          
-          # Test health endpoint availability
+
           for i in {1..10}; do
             if curl -f "$APP_URL/health" > /dev/null 2>&1; then
               echo "✅ Deployed application is responding!"
@@ -165,13 +117,5 @@ jobs:
             echo "Attempt $i: Deployment not ready yet, waiting..."
             sleep 10
           done
-          
-          # Run comprehensive tests against deployed application
-          cd app
-          echo "Installing test dependencies..."
-          npm install --only=dev
-          export TEST_BASE_URL="$APP_URL"
-          echo "Running full test suite against deployed application..."
-          npx jest --ci --coverage --watchAll=false
-          
+
           echo "✅ Deployment verification completed successfully!"
