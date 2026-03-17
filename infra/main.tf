@@ -45,8 +45,14 @@ resource "azurerm_service_plan" "appserviceplan" {
   sku_name            = "F1"
 }
 
+
+resource "random_integer" "suffix" {
+  min = 1000
+  max = 9999
+}
+
 resource "azurerm_linux_web_app" "appservice" {
-  name                = "app-myapp-${var.environment}"
+  name                = "app-myapp${random_integer.suffx.result}-${var.environment}"
   location            = data.azurerm_resource_group.infra.location
   resource_group_name = data.azurerm_resource_group.infra.name
   service_plan_id     = azurerm_service_plan.appserviceplan.id
