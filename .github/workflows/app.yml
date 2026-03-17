@@ -27,7 +27,6 @@ run-name: app | deploy | ${{ github.event.inputs.environment || 'dev' }} | ${{ g
 jobs:
   deploy-to-azure:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'dev' }}
     steps:
       - uses: actions/checkout@v4
 
