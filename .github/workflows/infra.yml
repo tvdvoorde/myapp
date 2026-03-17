@@ -42,13 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 'Environment variables #1'
+      - name: 'Environment variables'
         run: |
           cat env/generic.env >>$GITHUB_ENV
           cat env/${{ github.event.inputs.environment }}.env >>$GITHUB_ENV
-
-      - name: 'Environment variables #2'
-        run: |
           echo "TF_VAR_web_app_name=${WEB_APP_NAME}" >>$GITHUB_ENV
 
       - name: Azure Login
