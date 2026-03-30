@@ -46,7 +46,6 @@ jobs:
         run: |
           rm -rf deploy release.zip
           mkdir deploy
-          cp requirements.txt deploy/
           cp -R app/. deploy/
           cd deploy
           zip -r ../release.zip .
