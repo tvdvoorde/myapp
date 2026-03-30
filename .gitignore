@@ -39,3 +39,6 @@ terraform.rc
 # python
 
 venv/
+
+# node
+node_modules/
